@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Evening Badminton</title>
+  <script src="https://cdn.jsdelivr.net/npm/p5@2.1.1/lib/p5.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/p5.brush@2.0.1-beta/dist/p5.brush.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #fbf8f1; }
+    body { display: grid; place-items: center; }
+    canvas { max-width: 100vw; max-height: 100vh; width: auto !important; height: auto !important; }
+    #hint { position: fixed; bottom: 12px; left: 16px; font: 12px/1.4 system-ui, sans-serif; color: #b5ad9c; }
+  </style>
+</head>
+<body>
+<div id="hint">R new seed · S save PNG</div>
+<script>
+// =============================================================================
+//  Evening Badminton — gouache-style scene in code (p5.js 2 + p5.brush)
+//  Setting: public park court — teal court, yellow net posts on blue bases,
+//  floodlight, hedges with hibiscus, wooden bin, distant towers.
+//  People = a tiny pose rig (joint angles → tapered limb capsules).
+// =============================================================================
+
+const W = 1400, H = 1000;
+
+const CONFIG = {
+  seed: Number(new URLSearchParams(location.search).get('seed')) || 11,
+  wobble: 0.16,      // hand-cut edges
+  passes: 3,         // stacked fills on big shapes (mottling)
+  bleed: 0.16,
+  texture: 0.55,
+  border: 0.35,
+  grain: 0.06,
+  body: 1.6,         // pigment density: ~1 wash, 1.6+ gouache
+  figH: 112,         // player height in px
+  edge: 8,           // max polygon edge length before fill (lower = tighter edges, slower)
+  skyline: true,     // faint towers in the distance
+  shiftY: 100,       // moves the whole scene down
+  tree: new URLSearchParams(location.search).get('tree') || 'row',   // back | row | front | none | old
+};
+
+// ── POSES ────────────────────────────────────────────────────────────────────
+// Angles in degrees, measured from "hanging straight down", positive = toward
+// the way the player faces. 180 = straight up. Tune these by eye.
+//   lean: torso tilt   lift: jump height (× figH)
+//   legF/legB: [thigh, shin]   armR (racket) / armO (free): [upper, fore]
+//   racket: racket direction from the hand
+const POSES = {
+  smash: { lean: -14, lift: 0.14, legF: [60, -15], legB: [-20, -75], armR: [165, 150], armO: [115, 85],  racket: 140 },
+  lunge: { lean: 38,  lift: 0,    legF: [72, 8],   legB: [-58, -82], armR: [80, 95],   armO: [-55, -30], racket: 100 },
+  ready: { lean: 12,  lift: 0,    legF: [22, 4],   legB: [-22, -6],  armR: [40, 145],  armO: [30, 70],   racket: 165 },
+  idle:  { lean: 3,   lift: 0,    legF: [6, 0],    legB: [-6, 0],    armR: [10, 6],    armO: [-10, -4],  racket: 2 },
+};
+
+const PAL = {
+  paper:   '#fbf8f1',
+  court:   ['#4aa88a', '#55b295', '#469f84'],
+  apron:   ['#7cc0a8', '#86c7b0'],
+  line:    '#f4f7f1',
+  netPost: ['#f2c430', '#f6d24e'],
+  netBase: ['#2f5fb8', '#3a6cc4'],
+  mesh:    '#26302c',
+  pole:    ['#2b5cc4', '#3467cf'],
+  lampBox: ['#4b525c'],
+  lampFace:['#f3efdc'],
+  leaf:    ['#4f8f44', '#5e9e4c', '#3f7d3a', '#6aa955'],
+  leafDk:  '#2f5e2c',
+  tree:    ['#6fa84a', '#7fb755', '#5e9a40', '#8cc062'],
+  bark:    ['#7a5136', '#8a5d3e'],
+  hibiscus:['#e8413a', '#f05a48'],
+  tower:   ['#dfe4ea', '#d5dbe3'],
+  wood:    ['#a45a30', '#b4683a'],
+  bag:     ['#2c3a55', '#34445f'],
+  tube:    ['#2f6fd0', '#3b7ad8'],
+  steel:   ['#c9cdcb', '#d8dbd9'],
+  grass:   '#8fbf4f',
+  shadow:  '#2d6e5b',
+  ink:     '#33322f',
+};
+
+const PLAYERS = {
+  A: { skin: '#c68b5e', hair: '#231d19', shirt: '#f4f3ee', shorts: '#c6b088', shoe: '#ffffff', racket: '#d23a3a' },
+  B: { skin: '#b0764c', hair: '#1d1916', shirt: '#5a8fd8', shorts: '#3b475a', shoe: '#eeeeee', racket: '#2f2f2f' },
+  C: { skin: '#d29f78', hair: '#2b221c', shirt: '#e9cf62', shorts: '#5c6b4e', shoe: '#f5f5f5', racket: '#2f6fd0' },
+};
+
+// Court geometry: u = metres along the length (0–13.4), v = across (0–6.1)
+const ORIGIN = [430, 330], LU = [50, 0], LV = [-20, 30];
+const court = (u, v) => [ORIGIN[0] + u * LU[0] + v * LV[0], ORIGIN[1] + u * LU[1] + v * LV[1]];
+
+// ── ANIMATION ────────────────────────────────────────────────────────────────
+// Flip-book: the static scene is painted once into layers; the rally (players,
+// shuttle, notes) is pre-painted as FRAMES images, each with its own seed so the
+// linework "boils" like hand-drawn animation. Playback is just image swaps.
+const ANIM = {
+  frames: 12,        // frames in one rally loop
+  fps: 8,            // flip-book speed (hand-drawn feel lives around 8–12)
+  // action region (scene coords) — only this part is repainted per frame
+  region: { x: 360, y: 60, w: 680, h: 650 },
+};
+
+// Rally storyboard. [frame, pose, u, v] keyframes per player; loops at ANIM.frames.
+// A smashes at frame 1 → shuttle drops to B → B lunges, lifts it back at frame 6.
+const PREP = { lean: -22, lift: 0.07, legF: [45, -10], legB: [-25, -60], armR: [175, 235], armO: [125, 100], racket: 250 };
+const FOLLOW = { lean: 22, lift: 0.03, legF: [50, -5], legB: [-30, -60], armR: [60, 35], armO: [-20, -10], racket: 40 };
+const TIMELINE = {
+  A: [[0, PREP, 3.0, 3.6], [1, 'smash', 3.0, 3.6], [3, FOLLOW, 3.1, 3.6], [6, 'ready', 3.3, 3.5], [9, 'ready', 3.2, 3.6], [11, PREP, 3.0, 3.6]],
+  B: [[0, 'ready', 11.3, 2.9], [3, 'ready', 11.0, 2.6], [5, 'lunge', 10.7, 2.3], [6, 'lunge', 10.6, 2.2], [8, 'lunge', 10.7, 2.3], [10, 'ready', 11.2, 2.8]],
+};
+
+const ease = t => t * t * (3 - 2 * t);
+function lerpPose(a, b, t) {
+  const out = {};
+  for (const k in a) out[k] = Array.isArray(a[k]) ? a[k].map((v, i) => v + (b[k][i] - v) * t) : a[k] + (b[k] - a[k]) * t;
+  return out;
+}
+// Pose + court position of a player at (fractional) frame f.
+function playerAt(track, f) {
+  const N = ANIM.frames, keys = track.map(([fr, p, u, v]) => [fr, typeof p === 'string' ? POSES[p] : p, u, v]);
+  f = ((f % N) + N) % N;
+  let i = keys.length - 1;
+  while (i > 0 && keys[i][0] > f) i--;
+  const a = keys[i], b = keys[(i + 1) % keys.length];
+  const span = ((b[0] - a[0]) + N) % N || N;
+  const t = ease((((f - a[0]) + N) % N) / span);
+  return { pose: lerpPose(a[1], b[1], t), pos: court(a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t) };
+}
+
+// Shuttle position at frame f: smash A→B over frames 1–6, high lift B→A over 6–13.
+function shuttleAt(f) {
+  const N = ANIM.frames;
+  const a = playerAt(TIMELINE.A, 1), b = playerAt(TIMELINE.B, 6);
+  const hitA = figure(...a.pos, a.pose, PLAYERS.A, 1, CONFIG.figH, false);
+  const hitB = figure(...b.pos, b.pose, PLAYERS.B, -1, CONFIG.figH, false);
+  f = ((f - 1) % N + N) % N;                 // 0 = A's hit
+  if (f <= 5) {                               // smash: fast, nearly straight
+    const t = f / 5;
+    const p = lp(hitA, hitB, t);
+    return [p[0], p[1] - Math.sin(t * Math.PI) * 18];
+  }
+  const t = (f - 5) / (N - 5);                // lift: high arc back over the net
+  const p = lp(hitB, hitA, t);
+  return [p[0], p[1] - 4 * 230 * t * (1 - t)];
+}
+
+function actionFrame(i) {
+  const k = i / ANIM.frames;
+  for (const [id, dir] of [['B', -1], ['A', 1]]) {
+    const { pose, pos } = playerAt(TIMELINE[id], i);
+    figure(...pos, pose, PLAYERS[id], dir);
+  }
+  const p = shuttleAt(i), prev = shuttleAt(i - 0.45);
+  push();                                      // short motion streak behind it
+  for (let s = 0; s < 3; s++) pencil('2H', '#7d8a85', 0.6, lp(prev, p, s / 3), lp(prev, p, s / 3 + 0.18));
+  pop();
+  shuttle(p, atan2(p[1] - prev[1], p[0] - prev[0]), 1.1);
+  speakerFx(470, 640, k);
+}
+
+// ── setup / draw ─────────────────────────────────────────────────────────────
+// Painting happens across the first draw() calls (p5.brush finishes its marks
+// at the end of each draw, so a snapshot is taken at the start of the next):
+//   phase 0       paint the whole static scene
+//   phase 1       snapshot it as the background, paint rally frame 0 on top
+//   phase 2..N+1  snapshot the previous frame's action region, paint the next
+// After that, draw() just swaps snapshots.
+let BG = null, FRAMES = [], phase = 0, ready = false, paused = false, still = 0;
+
+const setStatus = msg => { document.getElementById('hint').textContent = msg; };
+
+function staticScene() {
+  paper();
+  push();
+  translate(0, CONFIG.shiftY);
+  if (CONFIG.skyline) skyline();
+  trees('behind');
+  courtSurface();
+  courtLines();
+  net();
+  floodlight(1245, 545);
+  figure(1150, 575, 'idle', PLAYERS.C, -1);
+  kit(985, 640);
+  speaker(470, 640);
+  spareShuttles();
+  bin(1250, 820);
+  trees('front');
+  hedge(205, 790);
+  grassTicks();
+  pop();
+}
+
+async function setup() {
+  createCanvas(W, H, WEBGL);
+  pixelDensity(2);
+  angleMode(DEGREES);
+  noiseSeed(CONFIG.seed);
+  // opaque flat brush for stroke-filled shapes (built-in "marker" is ~transparent)
+  brush.add('gouache', { type: 'default', weight: 1.4, scatter: 0.1, sharpness: 0.7, grain: 4, opacity: 200, spacing: 0.15, pressure: [1, 1], rotate: 'natural' });
+  setStatus('painting the park…');
+}
+
+function draw() {
+  const R = ANIM.region, N = ANIM.frames;
+  translate(-W / 2, -H / 2);
+
+  if (!ready) {
+    if (phase === 0) {
+      randomSeed(CONFIG.seed);
+      staticScene();
+    } else {
+      if (phase === 1) BG = get();
+      else FRAMES.push(get(R.x, R.y + CONFIG.shiftY, R.w, R.h));
+      const i = phase - 1;
+      if (i < N) {
+        setStatus(`painting frame ${i + 1} / ${N}…`);
+        image(BG, 0, 0, W, H);
+        randomSeed(CONFIG.seed + 100 + i);       // new seed per frame = line boil
+        push(); translate(0, CONFIG.shiftY); actionFrame(i); pop();
+      } else {
+        ready = true;
+        window._ready = true;
+        setStatus('R new seed · S save PNG · Space pause');
+      }
+    }
+    phase++;
+    if (!ready) return;
+  }
+
+  image(BG, 0, 0, W, H);
+  if (!paused) still = Math.floor(millis() / (1000 / ANIM.fps)) % N;
+  image(FRAMES[still], R.x, R.y + CONFIG.shiftY, R.w, R.h);
+}
+
+// ── paper ────────────────────────────────────────────────────────────────────
+function paper() {
+  background(PAL.paper);
+  const g = createGraphics(W, H);
+  g.pixelDensity(1);
+  g.loadPixels();
+  for (let i = 0; i < g.pixels.length; i += 4) {
+    const px = (i / 4) % W, py = Math.floor(i / 4 / W);
+    const n = noise(px * 0.004, py * 0.004) * 0.6 + Math.random() * 0.4;
+    const v = 255 * (1 - CONFIG.grain * n);
+    g.pixels[i] = v; g.pixels[i + 1] = v * 0.995; g.pixels[i + 2] = v * 0.98;
+    g.pixels[i + 3] = 255 * CONFIG.grain * 2.2 * n;
+  }
+  g.updatePixels();
+  image(g, 0, 0);
+  g.remove();
+}
+
+// ── core helpers ─────────────────────────────────────────────────────────────
+function blob(cx, cy, rx, ry, rot = 0, wob = CONFIG.wobble, n = 40) {
+  const pts = [], off = random(1000);
+  for (let i = 0; i < n; i++) {
+    const a = (360 / n) * i;
+    const k = 1 + (noise(off + cos(a) * 0.9, off + sin(a) * 0.9) - 0.5) * 2 * wob;
+    const x = cos(a) * rx * k, y = sin(a) * ry * k;
+    pts.push([cx + x * cos(rot) - y * sin(rot), cy + x * sin(rot) + y * cos(rot)]);
+  }
+  return pts;
+}
+
+const jitter = (pts, amt) => pts.map(([x, y]) => [x + random(-amt, amt), y + random(-amt, amt)]);
+const lp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+
+// p5.brush fill crashes on polygons with < 8 vertices (_center() in fill.js),
+// so subdivide edges until there are enough points.
+function densify(pts, min = 12) {
+  while (pts.length < min) {
+    const out = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      out.push(a, lp(a, b, 0.5));
+    }
+    pts = out;
+  }
+  return pts;
+}
+
+// p5.brush bleed pushes each edge out in proportion to its length, so long
+// edges (poles, court sides) explode into diamonds. Cap every edge length.
+function capEdges(pts, maxLen = CONFIG.edge) {
+  const out = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / maxLen));
+    for (let k = 0; k < n; k++) out.push(lp(a, b, k / n));
+  }
+  return out;
+}
+
+// Stacked watercolor fills = mottled gouache body.
+function paint(pts, colors, { passes = CONFIG.passes, opacity = 130, spread = 3, bleed = CONFIG.bleed } = {}) {
+  pts = densify(pts);   // keep vertex count modest: many points → p5.brush trims long runs → spikes
+  push();
+  brush.noStroke();
+  brush.noHatch();
+  for (let p = 0; p < passes; p++) {
+    brush.fill(colors[p % colors.length], Math.min(255, opacity * CONFIG.body * (p === 0 ? 1 : 0.55)));
+    brush.fillBleed(bleed * random(0.6, 1.3));
+    brush.fillTexture(CONFIG.texture, CONFIG.border);
+    brush.polygon(p === 0 ? pts : jitter(pts, spread));
+  }
+  pop();
+}
+
+// Hard-edged objects (poles, tubes, bags): fill = dense marker strokes clipped
+// to the outline. Watercolor fill spikes on thin shapes; strokes never do.
+function strokeFill(pts, cols, angle, { dist = 1.6, w = 1, name = 'gouache' } = {}) {
+  pts = densify(pts);
+  push();
+  brush.noFill(); brush.noStroke();
+  cols.forEach((c, i) => {
+    brush.hatchStyle(name, c, w);
+    brush.hatch(dist + i * 0.4, angle + i * 4, { rand: 0.04 });
+    brush.polygon(pts);
+  });
+  brush.noHatch();
+  pop();
+}
+
+function pencil(name, col, w, a, b) {
+  brush.set(name, col, w);
+  brush.line(a[0], a[1], b[0], b[1]);
+}
+
+// Tapered limb: a rounded capsule from a (width wa) to b (width wb).
+function capsule(a, b, wa, wb, n = 6) {
+  const ang = atan2(b[1] - a[1], b[0] - a[0]), pts = [];
+  for (let i = 0; i <= n; i++) { const t = ang - 90 + (180 * i) / n; pts.push([b[0] + cos(t) * wb / 2, b[1] + sin(t) * wb / 2]); }
+  for (let i = 0; i <= n; i++) { const t = ang + 90 + (180 * i) / n; pts.push([a[0] + cos(t) * wa / 2, a[1] + sin(t) * wa / 2]); }
+  return pts;
+}
+
+// Small opaque part (limbs, heads, gear). Watercolor fills are glazes — light
+// colours vanish over the dark court — so small parts are painted with strokes.
+const solid = (pts, col, _o, angle = 0) => strokeFill(pts, [col], angle, { dist: 0.9, w: 1.1 });
+
+// ── the figure rig ───────────────────────────────────────────────────────────
+// Returns the racket-head centre (used to aim the shuttle). drawIt=false → just measure.
+function figure(x, y, poseName, look, dir = 1, Hf = CONFIG.figH, drawIt = true) {
+  const P = typeof poseName === 'string' ? POSES[poseName] : poseName;
+  const L = { thigh: 0.26 * Hf, shin: 0.25 * Hf, up: 0.17 * Hf, fore: 0.15 * Hf, torso: 0.30 * Hf };
+  const at = (p, len, a) => [p[0] + sin(a) * len * dir, p[1] + cos(a) * len];
+
+  // build skeleton around the hip at (0,0)
+  const hip = [0, 0];
+  const kneeF = at(hip, L.thigh, P.legF[0]), footF = at(kneeF, L.shin, P.legF[1]);
+  const kneeB = at(hip, L.thigh, P.legB[0]), footB = at(kneeB, L.shin, P.legB[1]);
+  const neck = [sin(P.lean) * L.torso * dir, -cos(P.lean) * L.torso];
+  const head = [neck[0] + sin(P.lean) * 0.085 * Hf * dir, neck[1] - cos(P.lean) * 0.085 * Hf];
+  const sh = lp(neck, hip, 0.1);
+  const elbR = at(sh, L.up, P.armR[0]), handR = at(elbR, L.fore, P.armR[1]);
+  const elbO = at(sh, L.up, P.armO[0]), handO = at(elbO, L.fore, P.armO[1]);
+
+  // drop the lowest foot onto the ground point, then lift for jumps
+  const low = Math.max(footF[1], footB[1]);
+  const ox = x, oy = y - low - P.lift * Hf;
+  const T = p => [p[0] + ox, p[1] + oy];
+  const hR = T(handR);
+  const rc = [hR[0] + sin(P.racket) * dir * 0.21 * Hf, hR[1] + cos(P.racket) * 0.21 * Hf];
+  if (!drawIt) return rc;
+
+  // ground shadow (stays on the ground when jumping)
+  paint(blob(x - dir * 2, y + 2, 0.24 * Hf, 0.06 * Hf, 0, 0.1, 20), [PAL.shadow], { passes: 1, opacity: 60, bleed: 0.05, spread: 0 });
+
+  const limb = (a, b, wa, wb, col) => {
+    const A = T(a), B = T(b);
+    solid(jitter(capsule(A, B, wa, wb), 0.2), col, 0, atan2(B[1] - A[1], B[0] - A[0]));
+  };
+  const shade = shadeOf(look.skin);
+
+  // far side first
+  limb(sh, elbO, 0.045 * Hf, 0.038 * Hf, shade);
+  limb(elbO, handO, 0.036 * Hf, 0.03 * Hf, shade);
+  limb(sh, lp(sh, elbO, 0.45), 0.06 * Hf, 0.055 * Hf, shadeOf(look.shirt));
+  limb(hip, kneeB, 0.08 * Hf, 0.058 * Hf, shade);
+  limb(kneeB, footB, 0.055 * Hf, 0.038 * Hf, shade);
+  limb(hip, lp(hip, kneeB, 0.5), 0.09 * Hf, 0.075 * Hf, shadeOf(look.shorts));
+  shoe(T(footB), look.shoe, dir, Hf);
+
+  // torso + shorts
+  limb(hip, neck, 0.14 * Hf, 0.16 * Hf, look.shirt);
+  solid(blob(...T([0, 0.01 * Hf]), 0.085 * Hf, 0.06 * Hf, P.lean * dir, 0.08, 16), look.shorts);
+
+  // near leg
+  limb(hip, kneeF, 0.08 * Hf, 0.058 * Hf, look.skin);
+  limb(kneeF, footF, 0.055 * Hf, 0.038 * Hf, look.skin);
+  limb(hip, lp(hip, kneeF, 0.5), 0.09 * Hf, 0.075 * Hf, look.shorts);
+  shoe(T(footF), look.shoe, dir, Hf);
+
+  // head + hair
+  const hd = T(head);
+  solid(blob(hd[0], hd[1], 0.062 * Hf, 0.068 * Hf, 0, 0.05, 18), look.skin);
+  solid(blob(hd[0] - dir * 0.014 * Hf, hd[1] - 0.03 * Hf, 0.066 * Hf, 0.045 * Hf, -dir * 10, 0.12, 18), look.hair);
+
+  // racket arm on top
+  limb(sh, elbR, 0.045 * Hf, 0.038 * Hf, look.skin);
+  limb(elbR, handR, 0.036 * Hf, 0.03 * Hf, look.skin);
+  limb(sh, lp(sh, elbR, 0.45), 0.062 * Hf, 0.056 * Hf, look.shirt);
+  racket(T(handR), P.racket, dir, look.racket, Hf);
+  return rc;
+}
+
+function shoe(f, col, dir, Hf) {
+  solid(blob(f[0] + dir * 0.02 * Hf, f[1] - 0.008 * Hf, 0.045 * Hf, 0.022 * Hf, 0, 0.05, 14), col, 240);
+}
+
+function racket(hand, angle, dir, col, Hf) {
+  const v = [sin(angle) * dir, cos(angle)];
+  const shaftEnd = [hand[0] + v[0] * 0.13 * Hf, hand[1] + v[1] * 0.13 * Hf];
+  const c = [hand[0] + v[0] * 0.21 * Hf, hand[1] + v[1] * 0.21 * Hf];
+  const ang = atan2(v[1], v[0]);
+  const oval = [];
+  for (let i = 0; i < 22; i++) {
+    const t = (360 / 22) * i, lx = cos(t) * 0.085 * Hf, ly = sin(t) * 0.062 * Hf;
+    oval.push([c[0] + lx * cos(ang) - ly * sin(ang), c[1] + lx * sin(ang) + ly * cos(ang)]);
+  }
+  push();
+  pencil('pen', PAL.ink, 0.7, hand, shaftEnd);
+  brush.noFill();
+  brush.hatchStyle('2H', '#8e8e88', 0.45);
+  brush.hatch(2.6, ang + 90, { rand: 0 });
+  brush.set('pen', col, 0.75);
+  brush.polygon(oval);
+  brush.noStroke();
+  brush.hatch(2.6, ang, { rand: 0 });
+  brush.polygon(oval);
+  brush.noHatch();
+  pop();
+}
+
+function shadeOf(hex) {   // darker, slightly cooler version for the far side
+  const c = color(hex);
+  return color(red(c) * 0.8, green(c) * 0.8, blue(c) * 0.86).toString('#rrggbb');
+}
+
+// ── court ────────────────────────────────────────────────────────────────────
+function courtSurface() {
+  const quad = (u0, v0, u1, v1) => [court(u0, v0), court(u1, v0), court(u1, v1), court(u0, v1)];
+  // soft watercolor washes, layered (apron, then court)
+  paint(jitter(densify(quad(-1.6, -1.1, 15, 7.2), 16), 2), PAL.apron, { passes: 3, opacity: 120, spread: 4, bleed: 0.1 });
+  paint(jitter(densify(quad(0, 0, 13.4, 6.1), 16), 1.5), PAL.court, { passes: 3, opacity: 140, spread: 3, bleed: 0.08 });
+  // mottling: soft round blotches kept inside the court
+  for (let i = 0; i < 26; i++) {
+    const [x, y] = court(random(1.2, 12.2), random(1, 5.1));
+    paint(blob(x, y, random(18, 34), random(12, 22), random(360), 0.25, 24), [random(PAL.court), '#56b294'], { passes: 1, opacity: 45, spread: 0, bleed: 0.06 });
+  }
+}
+
+function courtLines() {
+  const L = [];
+  for (const v of [0, 0.46, 5.64, 6.1]) L.push([0, v, 13.4, v]);          // side + singles sidelines
+  for (const u of [0, 0.76, 4.72, 8.68, 12.64, 13.4]) L.push([u, 0, u, 6.1]); // back, long & short service
+  L.push([0, 3.05, 4.72, 3.05], [8.68, 3.05, 13.4, 3.05]);                // centre lines
+  push();
+  for (const [u0, v0, u1, v1] of L) {
+    pencil('pen', PAL.line, 1.5, court(u0, v0), court(u1, v1));
+    pencil('pen', PAL.line, 1.1, court(u0, v0), court(u1, v1));
+  }
+  pop();
+}
+
+function net() {
+  const pH = 70, drop = 34;
+  const ends = [court(6.7, -0.5), court(6.7, 6.6)];
+  const tops = ends.map(([x, y]) => [x, y - pH]);
+  // mesh
+  const mesh = densify([tops[0], tops[1], [tops[1][0], tops[1][1] + drop], [tops[0][0], tops[0][1] + drop]], 16);
+  push();
+  brush.noFill(); brush.noStroke();
+  brush.hatchStyle('pen', PAL.mesh, 0.35);
+  brush.hatch(4, 60, { rand: 0.02 }); brush.polygon(mesh);
+  brush.hatch(4, -30, { rand: 0.02 }); brush.polygon(mesh);
+  brush.noHatch();
+  pop();
+  // posts + bases + tape
+  for (const [x, y] of ends) {
+    strokeFill([[x - 10, y - 5], [x + 10, y - 5], [x + 10, y + 5], [x - 10, y + 5]], PAL.netBase, 0, { dist: 1.2 });
+    strokeFill(capsule([x, y], [x, y - pH - 3], 5, 4), PAL.netPost, 90, { dist: 1.1 });
+  }
+  push();
+  pencil('pen', '#ffffff', 1.6, tops[0], tops[1]);
+  pencil('pen', PAL.mesh, 0.5, [tops[0][0], tops[0][1] + drop], [tops[1][0], tops[1][1] + drop]);
+  pop();
+}
+
+// ── shuttle ──────────────────────────────────────────────────────────────────
+function shuttle(p, dirAng, s = 1) {
+  const back = [p[0] - cos(dirAng) * 11 * s, p[1] - sin(dirAng) * 11 * s];
+  const n = [-sin(dirAng), cos(dirAng)];
+  const skirt = [
+    [p[0] + n[0] * 2 * s, p[1] + n[1] * 2 * s], [back[0] + n[0] * 5 * s, back[1] + n[1] * 5 * s],
+    [back[0] - n[0] * 5 * s, back[1] - n[1] * 5 * s], [p[0] - n[0] * 2 * s, p[1] - n[1] * 2 * s],
+  ];
+  solid(skirt, '#ffffff', 240);
+  push();
+  pencil('pen', '#9a9a94', 0.4, skirt[1], skirt[2]);
+  pop();
+  solid(blob(p[0], p[1], 2.8 * s, 2.8 * s, 0, 0.05, 12), '#f1e6cf', 255);
+}
+
+function shuttleInFlight(from, to) {
+  push();
+  for (let t = 0; t < 0.85; t += 0.14) {   // dashed path
+    const a = lp(from, to, t), b = lp(from, to, t + 0.07);
+    pencil('2H', '#7d8a85', 0.6, a, b);
+  }
+  pop();
+  shuttle(to, atan2(to[1] - from[1], to[0] - from[0]), 1.1);
+}
+
+function spareShuttles() {
+  for (const [x, y, a] of [[300, 610], [720, 600], [1080, 480], [560, 250], [880, 690], [380, 880]].map(p => [...p, random(360)]))
+    shuttle([x, y], a, 0.9);
+}
+
+// ── surroundings ─────────────────────────────────────────────────────────────
+function floodlight(x, y) {
+  const top = [x - 4, 120];
+  strokeFill([[x - 13, y - 7], [x + 13, y - 7], [x + 13, y + 6], [x - 13, y + 6]], ['#5f6f86', '#6f7f96'], 0, { dist: 1.3 });
+  strokeFill(capsule([x, y], top, 11, 8), PAL.pole, 90, { dist: 1.2 });
+  push();
+  pencil('pen', '#3a3f46', 1.1, [top[0] - 34, top[1] + 4], [top[0] + 30, top[1] - 2]);
+  pencil('pen', '#3a3f46', 1.1, [top[0] - 26, top[1] - 16], [top[0] + 24, top[1] - 20]);
+  pop();
+  for (const [lx, ly] of [[-30, 2], [-8, 0], [16, -2], [-20, -18], [8, -20]]) {
+    const cx = top[0] + lx, cy = top[1] + ly - 6;
+    solid(densify([[cx - 8, cy - 5], [cx + 8, cy - 6], [cx + 8, cy + 4], [cx - 8, cy + 5]]), PAL.lampBox[0], 240);
+    solid(densify([[cx - 6, cy + 1], [cx + 6, cy], [cx + 6, cy + 4], [cx - 6, cy + 5]]), PAL.lampFace[0], 240);
+  }
+}
+
+function skyline() {
+  const towers = [[905, 285, 46, 175], [960, 285, 38, 125], [1015, 285, 52, 205], [1075, 285, 34, 110]];
+  for (const [x, y, w, h] of towers) {
+    const pts = densify([[x - w / 2, y - h], [x + w / 2, y - h], [x + w / 2, y], [x - w / 2, y]], 16);
+    paint(jitter(pts, 1.5), PAL.tower, { passes: 2, opacity: 70, spread: 2 });
+    push();
+    brush.noFill(); brush.noStroke();
+    brush.hatchStyle('2H', '#b9c2cd', 0.4);
+    brush.hatch(9, 0, { rand: 0.05 });
+    brush.polygon(pts);
+    brush.noHatch();
+    pop();
+  }
+}
+
+// Ellipse lying flat on the ground plane — sheared along the court's own axes,
+// so shadows sit in the same slanted space as the court.
+function groundEllipse(x, y, ru, rv, n = 28) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = (360 / n) * i;
+    pts.push([x + cos(a) * ru * LU[0] + sin(a) * rv * LV[0], y + cos(a) * ru * LU[1] + sin(a) * rv * LV[1]]);
+  }
+  return pts;
+}
+
+// Tree standing on ground point (x,y). s = scale (1 ≈ 5 m tall vs 1.75 m player).
+function tree(x, y, s = 1) {
+  // shadow falls toward the back-right (light from front-left), on the ground plane
+  paint(jitter(groundEllipse(x + 40 * s, y - 6 * s, 2.6 * s, 2.2 * s), 2), ['#a9c79a', '#b6d1a6'], { passes: 2, opacity: 70, spread: 3, bleed: 0.06 });
+  push();
+  for (let i = 0; i < 7; i++) {   // grass at the foot
+    const gx = x + random(-60, 60) * s, gy = y + random(-8, 14) * s;
+    pencil('cpencil', PAL.grass, 1, [gx, gy], [gx + random(2, 5), gy - random(10, 16) * s]);
+  }
+  pop();
+  paint(densify([[x - 14 * s, y], [x - 8 * s, y - 120 * s], [x + 6 * s, y - 120 * s], [x + 14 * s, y]], 16), PAL.bark, { passes: 2, opacity: 160, spread: 1.5 });
+  const cy = y - 200 * s;
+  paint(blob(x, cy, 125 * s, 105 * s, 0, 0.2, 60), PAL.tree, { passes: 4, opacity: 140, spread: 8 });
+  for (const [dx, dy, rx, ry] of [[-60, -25, 55, 45], [55, -35, 60, 45], [0, -70, 65, 38], [-10, 50, 70, 38]])
+    paint(blob(x + dx * s, cy + dy * s, rx * s, ry * s, random(360), 0.25), shuffle([...PAL.tree]), { passes: 2, opacity: 90, spread: 5 });
+  push();
+  for (let i = 0; i < 60; i++) {
+    const a = random(360), r = random(25, 115) * s;
+    const p = [x + cos(a) * r, cy + sin(a) * r * 0.82];
+    pencil('cpencil', random([PAL.leafDk, '#4f8a39']), 0.8, p, [p[0] + random(-5, 5), p[1] + random(6, 13)]);
+  }
+  pop();
+}
+
+// Placement variants — ?tree=back | row | front | none | old
+function trees(when) {
+  const v = CONFIG.tree;
+  if (when === 'behind') {
+    if (v === 'back') tree(...court(-2.2, -2.4), 1.0);
+    if (v === 'row') for (const [u, s] of [[-1, 0.95], [3.5, 0.8], [8, 0.9]]) tree(...court(u, -2.6), s);
+    if (v === 'old') tree(165, 440);
+  }
+  if (when === 'front' && v === 'front') tree(115, 820, 1.35);
+}
+
+function hedge(cx, cy) {
+  for (let i = 0; i < 9; i++) {
+    const x = cx + map(i, 0, 8, -150, 150) + random(-10, 10), y = cy + random(-25, 20) - Math.sin(i / 8 * 180) * 25;
+    paint(blob(x, y, random(45, 65), random(38, 50), random(360), 0.22), shuffle([...PAL.leaf]), { passes: 2, opacity: 160, spread: 4 });
+  }
+  push();
+  for (let i = 0; i < 70; i++) {
+    const p = [cx + random(-185, 185), cy + random(-60, 45)];
+    pencil('cpencil', random([PAL.leafDk, '#7fb85e']), 0.8, p, [p[0] + random(-6, 6), p[1] + random(5, 12)]);
+  }
+  pop();
+  for (let i = 0; i < 6; i++) hibiscus(cx + random(-160, 160), cy + random(-55, 25));
+}
+
+function hibiscus(x, y) {
+  for (let k = 0; k < 5; k++) {
+    const a = k * 72 + random(-8, 8);
+    solid(blob(x + cos(a) * 6, y + sin(a) * 6, 6, 4.5, a, 0.12, 12), random(PAL.hibiscus), 230);
+  }
+  solid(blob(x, y, 2.4, 2.4, 0, 0.05, 10), '#f7d046', 255);
+}
+
+function bin(x, y) {
+  const w = 52, h = 78;
+  paint(densify([[x - w / 2, y - h], [x + w / 2, y - h], [x + w / 2 - 3, y], [x - w / 2 + 3, y]], 16), PAL.wood, { passes: 2, opacity: 190, spread: 1.2, bleed: 0.05 });
+  solid(blob(x, y - h, w / 2 + 2, 7, 0, 0.04, 20), '#3e3b38', 230);
+  push();
+  for (let i = 1; i < 5; i++) {
+    const bx = x - w / 2 + (w / 5) * i;
+    pencil('HB', '#6e3a1d', 0.6, [bx, y - h + 8], [bx + 0.5, y - 3]);
+  }
+  pop();
+}
+
+function kit(x, y) {
+  // kit bag
+  strokeFill(blob(x, y, 48, 17, -2, 0.08, 28), PAL.bag, -2, { dist: 1.3 });
+  push(); pencil('HB', '#8fa0c0', 0.8, [x - 40, y - 2], [x + 38, y - 5]); pop();
+  // shuttle tube
+  strokeFill(capsule([x + 62, y + 22], [x + 128, y + 6], 13, 13), PAL.tube, -14, { dist: 1.2 });
+  solid(blob(x + 128, y + 6, 4, 6.5, -14, 0.05, 12), '#ffffff', 240);
+  // steel bottle
+  strokeFill(capsule([x - 70, y + 30], [x - 70, y - 8], 13, 12), PAL.steel, 90, { dist: 1.2 });
+  solid(blob(x - 70, y - 10, 5, 4, 0, 0.05, 12), '#5b5f63', 240);
+}
+
+// Portable party speaker on the court side, music drifting out of it.
+function speaker(x, y) {
+  const w = 46, h = 66;
+  paint(blob(x + 4, y + 3, w * 0.62, 7, 0, 0.1, 18), ['#c9c4b8'], { passes: 1, opacity: 90, bleed: 0.05, spread: 0 });
+  paint(densify([[x - w / 2, y - h], [x + w / 2, y - h], [x + w / 2, y], [x - w / 2, y]], 16), ['#2b2c33', '#33343c'], { passes: 2, opacity: 220, spread: 0.8, bleed: 0.03 });
+  for (const [cy, r] of [[y - h + 20, 13], [y - 20, 15]]) {
+    solid(blob(x, cy, r, r, 0, 0.04, 20), '#4a4c55', 240);
+    solid(blob(x, cy, r * 0.55, r * 0.55, 0, 0.04, 16), '#1d1e23', 250);
+    solid(blob(x, cy, r * 0.18, r * 0.18, 0, 0.04, 10), '#e8413a', 250);   // little red dust cap
+  }
+  push();
+  pencil('pen', '#2b2c33', 1.3, [x - 12, y - h - 1], [x - 10, y - h - 9]);   // handle
+  pencil('pen', '#2b2c33', 1.3, [x - 10, y - h - 9], [x + 10, y - h - 9]);
+  pencil('pen', '#2b2c33', 1.3, [x + 10, y - h - 9], [x + 12, y - h - 1]);
+  pop();
+}
+
+// Animated part of the speaker: pulsing sound waves + notes drifting up.
+// k = 0..1 loop phase.
+function speakerFx(x, y, k) {
+  const h = 66;
+  push();
+  for (let i = 0; i < 3; i++) {
+    const r = 36 + ((i / 3 + k * 2) % 1) * 30;          // waves travel outward
+    brush.set('2H', '#8a8f9a', 0.7);
+    brush.arc(x + 6, y - h / 2, r, -40, 25);
+  }
+  pop();
+  for (let n = 0; n < 4; n++) {
+    const ph = (k + n / 4) % 1;                          // each note at its own point in the drift
+    if (ph > 0.92) continue;
+    const nx = x + 20 - ph * 45 + sin(ph * 360 + n * 90) * 12;   // drift up-left, away from the court
+    const ny = y - 85 - ph * 150;
+    note(nx, ny, 1 - ph * 0.45, n % 2 === 0);
+  }
+}
+
+function note(x, y, s, beamed) {
+  const col = '#3a3a40';
+  solid(blob(x, y, 5.5 * s, 4 * s, -20, 0.08, 12), col, 230);
+  push();
+  pencil('pen', col, 0.8, [x + 4.6 * s, y - 1], [x + 4.6 * s, y - 24 * s]);
+  if (beamed) {
+    solid(blob(x + 14 * s, y - 4 * s, 5.5 * s, 4 * s, -20, 0.08, 12), col, 230);
+    pencil('pen', col, 0.8, [x + 18.6 * s, y - 5 * s], [x + 18.6 * s, y - 28 * s]);
+    pencil('pen', col, 1.6, [x + 4.6 * s, y - 24 * s], [x + 18.6 * s, y - 28 * s]);
+  } else {
+    pencil('pen', col, 0.8, [x + 4.6 * s, y - 24 * s], [x + 11 * s, y - 15 * s]);
+  }
+  pop();
+}
+
+function grassTicks() {
+  const spots = [[90, 560], [140, 920], [520, 700], [640, 880], [870, 790], [1090, 900], [1330, 640], [700, 200], [330, 140], [1330, 330]];
+  push();
+  for (const [gx, gy] of spots) {
+    const n = floor(random(4, 7));
+    for (let i = 0; i < n; i++) {
+      const tx = gx + i * 10 + (i > n / 2 ? 12 : 0), ty = gy + random(-3, 3);
+      pencil('cpencil', PAL.grass, 1.1, [tx, ty], [tx + random(3, 6), ty - random(12, 20)]);
+    }
+  }
+  pop();
+}
+
+// ── keys ─────────────────────────────────────────────────────────────────────
+function keyPressed() {
+  if (key === 's' || key === 'S') saveCanvas(`badminton-${CONFIG.seed}`, 'png');
+  if (key === ' ') paused = !paused;
+  if (key === 'r' || key === 'R') location.search = `?seed=${floor(random(1, 99999))}`;
+}
+</script>
+</body>
+</html>
