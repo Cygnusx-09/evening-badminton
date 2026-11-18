@@ -675,11 +675,12 @@ function speakerFx(x, y, k) {
   const NOTES = 2;                                       // notes in the air at once
   for (let n = 0; n < NOTES; n++) {
     const ph = (k + n / NOTES) % 1;                      // each note rises once per loop
-    const fade = Math.min(1, ph / 0.2) * Math.pow(1 - ph, 1.3);   // ease in, then dissolve as it rises
+    const LIFE = 0.55;                                   // share of the loop a note is visible
+    const fade = Math.min(1, ph / 0.12) * Math.pow(Math.max(0, 1 - ph / LIFE), 1.6);   // quick in, quicker dissolve
     if (fade < 0.06) continue;
     const nx = x + 20 - ph * 35 + sin(ph * 180 + n * 90) * 6;    // slow drift up-left, gentle sway
     const ny = y - 85 - ph * 95;
-    note(nx, ny, 1 - ph * 0.3, n % 2 === 0, fade);
+    note(nx, ny, 1 - ph * 0.3, false, fade);   // single notes only — 2 marks max
   }
 }
 function note(x, y, s, beamed, fade = 1) {
