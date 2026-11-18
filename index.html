@@ -667,22 +667,25 @@ function speakerFx(x, y, k) {
   const h = 66;
   push();
   for (let i = 0; i < 3; i++) {
-    const r = 36 + ((i / 3 + k * 2) % 1) * 30;          // waves travel outward
+    const r = 36 + ((i / 3 + k) % 1) * 30;              // waves travel outward, one ring-step per loop
     brush.set('2H', '#8a8f9a', 0.7);
     brush.arc(x + 6, y - h / 2, r, -40, 25);
   }
   pop();
-  for (let n = 0; n < 4; n++) {
-    const ph = (k + n / 4) % 1;                          // each note at its own point in the drift
-    if (ph > 0.92) continue;
-    const nx = x + 20 - ph * 45 + sin(ph * 360 + n * 90) * 12;   // drift up-left, away from the court
-    const ny = y - 85 - ph * 150;
-    note(nx, ny, 1 - ph * 0.45, n % 2 === 0);
+  const NOTES = 2;                                       // notes in the air at once
+  for (let n = 0; n < NOTES; n++) {
+    const ph = (k + n / NOTES) % 1;                      // each note rises once per loop
+    const fade = Math.min(1, ph / 0.2) * Math.pow(1 - ph, 1.3);   // ease in, then dissolve as it rises
+    if (fade < 0.06) continue;
+    const nx = x + 20 - ph * 35 + sin(ph * 180 + n * 90) * 6;    // slow drift up-left, gentle sway
+    const ny = y - 85 - ph * 95;
+    note(nx, ny, 1 - ph * 0.3, n % 2 === 0, fade);
   }
 }
-
-function note(x, y, s, beamed) {
-  const col = '#3a3a40';
+function note(x, y, s, beamed, fade = 1) {
+  // brush strokes ignore alpha, so "fade" = blend the ink toward whatever is painted underneath
+  const under = BG ? color(BG.get(Math.round(x), Math.round(y + CONFIG.shiftY))) : color('#f4efe4');
+  const col = lerpColor(under, color(58, 58, 64), fade);
   solid(blob(x, y, 5.5 * s, 4 * s, -20, 0.08, 12), col, 230);
   push();
   pencil('pen', col, 0.8, [x + 4.6 * s, y - 1], [x + 4.6 * s, y - 24 * s]);
