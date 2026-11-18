@@ -95,8 +95,10 @@ const court = (u, v) => [ORIGIN[0] + u * LU[0] + v * LV[0], ORIGIN[1] + u * LU[1
 // shuttle, notes) is pre-painted as FRAMES images, each with its own seed so the
 // linework "boils" like hand-drawn animation. Playback is just image swaps.
 const ANIM = {
-  frames: 12,        // frames in one rally loop
-  fps: 8,            // flip-book speed (hand-drawn feel lives around 8–12)
+  beats: 12,        // storyboard length (TIMELINE keyframes are in beats)
+  frames: 24,       // painted frames per loop — more = smoother in-betweens, longer paint
+  fps: 6,           // flip-book speed; loop lasts frames/fps seconds (24/6 = 4s)
+  boilEvery: 2,     // frames that share one line-wobble seed — higher = calmer lines
   // action region (scene coords) — only this part is repainted per frame
   region: { x: 360, y: 60, w: 680, h: 650 },
 };
@@ -118,7 +120,7 @@ function lerpPose(a, b, t) {
 }
 // Pose + court position of a player at (fractional) frame f.
 function playerAt(track, f) {
-  const N = ANIM.frames, keys = track.map(([fr, p, u, v]) => [fr, typeof p === 'string' ? POSES[p] : p, u, v]);
+  const N = ANIM.beats, keys = track.map(([fr, p, u, v]) => [fr, typeof p === 'string' ? POSES[p] : p, u, v]);
   f = ((f % N) + N) % N;
   let i = keys.length - 1;
   while (i > 0 && keys[i][0] > f) i--;
@@ -130,7 +132,7 @@ function playerAt(track, f) {
 
 // Shuttle position at frame f: smash A→B over frames 1–6, high lift B→A over 6–13.
 function shuttleAt(f) {
-  const N = ANIM.frames;
+  const N = ANIM.beats;
   const a = playerAt(TIMELINE.A, 1), b = playerAt(TIMELINE.B, 6);
   const hitA = figure(...a.pos, a.pose, PLAYERS.A, 1, CONFIG.figH, false);
   const hitB = figure(...b.pos, b.pose, PLAYERS.B, -1, CONFIG.figH, false);
@@ -147,6 +149,7 @@ function shuttleAt(f) {
 
 function actionFrame(i) {
   const k = i / ANIM.frames;
+  i = i * ANIM.beats / ANIM.frames;            // frame index → storyboard beat
   for (const [id, dir] of [['B', -1], ['A', 1]]) {
     const { pose, pos } = playerAt(TIMELINE[id], i);
     figure(...pos, pose, PLAYERS[id], dir);
@@ -216,7 +219,7 @@ function draw() {
       if (i < N) {
         setStatus(`painting frame ${i + 1} / ${N}…`);
         image(BG, 0, 0, W, H);
-        randomSeed(CONFIG.seed + 100 + i);       // new seed per frame = line boil
+        randomSeed(CONFIG.seed + 100 + Math.floor(i / ANIM.boilEvery));   // slower line boil
         push(); translate(0, CONFIG.shiftY); actionFrame(i); pop();
       } else {
         ready = true;
